@@ -21,6 +21,8 @@ const (
 	focusPicker
 	focusGrid
 	focusGridInput
+	focusPresets
+	focusPresetSaveInput
 )
 
 type App struct {
@@ -40,6 +42,11 @@ type App struct {
 	gridErr     string
 	gridInput   textinput.Model // URL input for grid cell assignment
 	gridTarget  gridCell        // which cell we're assigning to
+
+	// preset picker
+	presets       []grid.PresetInfo
+	presetCursor  int
+	presetNameIn  textinput.Model // name input for save
 }
 
 type gridCell struct {
@@ -57,6 +64,11 @@ type gridMsg []grid.MonitorLayout
 type gridErrMsg struct{ err error }
 type gridSetDoneMsg struct{ cell, url string }
 type gridSetErrMsg struct{ err error }
+type presetsMsg []grid.PresetInfo
+type presetsErrMsg struct{ err error }
+type presetAppliedMsg struct{ name string }
+type presetSavedMsg struct{ name string }
+type presetOpErrMsg struct{ err error }
 
 func NewApp() App {
 	ta := textarea.New()
@@ -72,11 +84,16 @@ func NewApp() App {
 	gi.Placeholder = "enter URL..."
 	gi.Width = 60
 
+	pn := textinput.New()
+	pn.Placeholder = "preset name..."
+	pn.Width = 40
+
 	return App{
-		compose:   ta,
-		filter:    fi,
-		gridInput: gi,
-		focus:     focusCompose,
+		compose:      ta,
+		filter:       fi,
+		gridInput:    gi,
+		presetNameIn: pn,
+		focus:        focusCompose,
 	}
 }
 
@@ -101,6 +118,35 @@ func fetchGrid() tea.Msg {
 	return gridMsg(layouts)
 }
 
+func fetchPresets() tea.Msg {
+	c := grid.NewClient("")
+	presets, err := c.GetPresets()
+	if err != nil {
+		return presetsErrMsg{err}
+	}
+	return presetsMsg(presets)
+}
+
+func applyPresetCmd(name string) tea.Cmd {
+	return func() tea.Msg {
+		c := grid.NewClient("")
+		if err := c.ApplyPreset(name); err != nil {
+			return presetOpErrMsg{err}
+		}
+		return presetAppliedMsg{name}
+	}
+}
+
+func savePresetCmd(name string) tea.Cmd {
+	return func() tea.Msg {
+		c := grid.NewClient("")
+		if err := c.SavePreset(name, ""); err != nil {
+			return presetOpErrMsg{err}
+		}
+		return presetSavedMsg{name}
+	}
+}
+
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
@@ -108,6 +154,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "esc":
+			if a.focus == focusPresetSaveInput {
+				a.focus = focusPresets
+				a.presetNameIn.Blur()
+				a.presetNameIn.SetValue("")
+				return a, nil
+			}
+			if a.focus == focusPresets {
+				a.focus = focusGrid
+				return a, nil
+			}
 			if a.focus == focusGridInput {
 				a.focus = focusGrid
 				a.gridInput.Blur()
@@ -150,6 +206,21 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+r":
 			return a, fetchSessions
 
+		case "p":
+			if a.focus == focusGrid {
+				a.focus = focusPresets
+				a.presetCursor = 0
+				return a, fetchPresets
+			}
+
+		case "S":
+			if a.focus == focusGrid || a.focus == focusPresets {
+				a.focus = focusPresetSaveInput
+				a.presetNameIn.SetValue("")
+				a.presetNameIn.Focus()
+				return a, nil
+			}
+
 		case "enter":
 			if a.focus == focusPicker && len(a.filtered) > 0 {
 				return a, a.sendToSelected()
@@ -171,12 +242,25 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return a, nil
 			}
+			if a.focus == focusPresets && len(a.presets) > 0 {
+				name := a.presets[a.presetCursor].Name
+				return a, applyPresetCmd(name)
+			}
+			if a.focus == focusPresetSaveInput {
+				name := strings.TrimSpace(a.presetNameIn.Value())
+				if name != "" {
+					return a, savePresetCmd(name)
+				}
+				return a, nil
+			}
 
 		case "up":
 			if a.focus == focusPicker && a.cursor > 0 {
 				a.cursor--
 			} else if a.focus == focusGrid && a.gridCursor > 0 {
 				a.gridCursor--
+			} else if a.focus == focusPresets && a.presetCursor > 0 {
+				a.presetCursor--
 			}
 			return a, nil
 
@@ -185,6 +269,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.cursor++
 			} else if a.focus == focusGrid && a.gridCursor < a.gridPaneCount()-1 {
 				a.gridCursor++
+			} else if a.focus == focusPresets && a.presetCursor < len(a.presets)-1 {
+				a.presetCursor++
 			}
 			return a, nil
 		}
@@ -232,6 +318,33 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.status = fmt.Sprintf("Grid set failed: %v", msg.err)
 		a.focus = focusGrid
 		a.gridInput.Blur()
+
+	case presetsMsg:
+		a.presets = msg
+		if a.presetCursor >= len(a.presets) {
+			a.presetCursor = max(0, len(a.presets)-1)
+		}
+
+	case presetsErrMsg:
+		a.status = fmt.Sprintf("Presets: %v", msg.err)
+		a.focus = focusGrid
+
+	case presetAppliedMsg:
+		a.status = fmt.Sprintf("Loaded preset '%s'", msg.name)
+		a.focus = focusGrid
+		return a, fetchGrid
+
+	case presetSavedMsg:
+		a.status = fmt.Sprintf("Saved preset '%s'", msg.name)
+		a.presetNameIn.SetValue("")
+		a.presetNameIn.Blur()
+		a.focus = focusPresets
+		return a, fetchPresets
+
+	case presetOpErrMsg:
+		a.status = fmt.Sprintf("Preset op failed: %v", msg.err)
+		a.presetNameIn.Blur()
+		a.focus = focusGrid
 	}
 
 	// Update focused component
@@ -250,6 +363,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	} else if a.focus == focusGridInput {
 		var cmd tea.Cmd
 		a.gridInput, cmd = a.gridInput.Update(msg)
+		cmds = append(cmds, cmd)
+	} else if a.focus == focusPresetSaveInput {
+		var cmd tea.Cmd
+		a.presetNameIn, cmd = a.presetNameIn.Update(msg)
 		cmds = append(cmds, cmd)
 	}
 
@@ -339,6 +456,9 @@ func (a *App) setGridCell(monitor, cell, url string) tea.Cmd {
 }
 
 func (a App) View() string {
+	if a.focus == focusPresets || a.focus == focusPresetSaveInput {
+		return a.viewPresets()
+	}
 	if a.focus == focusGrid || a.focus == focusGridInput {
 		return a.viewGrid()
 	}
@@ -440,7 +560,8 @@ func (a App) viewGrid() string {
 			if len(url) > 55 {
 				url = url[:52] + "..."
 			}
-			lines = append(lines, style.Render(fmt.Sprintf("%s%-4s %s", prefix, p.ID, url)))
+			target := fmt.Sprintf("%s%s", l.Monitor, p.ID)
+			lines = append(lines, style.Render(fmt.Sprintf("%s%-6s %s", prefix, target, url)))
 			idx++
 		}
 		lines = append(lines, "")
@@ -449,7 +570,7 @@ func (a App) viewGrid() string {
 	content := strings.Join(lines, "\n")
 
 	if a.focus == focusGridInput {
-		inputLabel := fmt.Sprintf("URL for %s/%s:", a.gridTarget.monitor, a.gridTarget.cell)
+		inputLabel := fmt.Sprintf("URL for %s%s:", a.gridTarget.monitor, a.gridTarget.cell)
 		content += "\n" + titleStyle.Render(inputLabel) + "\n" + a.gridInput.View()
 		keys := dimStyle.Render("[Enter] set  [Esc] cancel")
 		return activeStyle.Width(a.width - 4).Render(
@@ -457,9 +578,44 @@ func (a App) viewGrid() string {
 		) + "\n" + keys
 	}
 
-	keys := dimStyle.Render("[Enter] set URL  [Esc] back  [↑/↓] navigate")
+	keys := dimStyle.Render("[Enter] set URL  [p] presets  [S] save preset  [Esc] back  [↑/↓] navigate")
 
 	return activeStyle.Width(a.width - 4).Render(
 		titleStyle.Render("grid server layout") + "\n\n" + content,
 	) + "\n" + keys
+}
+
+func (a App) viewPresets() string {
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	activeStyle := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("214"))
+
+	var lines []string
+	if len(a.presets) == 0 {
+		lines = append(lines, dimStyle.Render("  (no presets)"))
+	}
+	for i, p := range a.presets {
+		prefix := "  "
+		style := lipgloss.NewStyle()
+		if i == a.presetCursor && a.focus == focusPresets {
+			prefix = "▸ "
+			style = style.Bold(true).Foreground(lipgloss.Color("214"))
+		}
+		desc := p.Description
+		if desc == "" {
+			desc = dimStyle.Render("(no description)")
+		}
+		lines = append(lines, style.Render(fmt.Sprintf("%s%-20s ", prefix, p.Name))+desc)
+	}
+
+	content := titleStyle.Render("layout presets") + "\n\n" + strings.Join(lines, "\n")
+
+	if a.focus == focusPresetSaveInput {
+		content += "\n\n" + titleStyle.Render("Save current layout as:") + "\n" + a.presetNameIn.View()
+		keys := dimStyle.Render("[Enter] save  [Esc] cancel")
+		return activeStyle.Width(a.width - 4).Render(content) + "\n" + keys
+	}
+
+	keys := dimStyle.Render("[Enter] load  [S] save current  [Esc] back  [↑/↓] navigate")
+	return activeStyle.Width(a.width - 4).Render(content) + "\n" + keys
 }
