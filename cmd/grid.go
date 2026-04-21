@@ -1,8 +1,12 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"strconv"
+	"strings"
 
 	"mux/internal/grid"
 
@@ -279,6 +283,65 @@ var gridBspReorderCmd = &cobra.Command{
 	},
 }
 
+// --- Shape (raw PUT) ---
+
+var gridShapeCmd = &cobra.Command{
+	Use:   "shape <monitor> <json|-|@file>",
+	Short: "Replace a monitor's full config with a JSON shape (raw PUT)",
+	Long: `Replace a monitor's config wholesale via PUT /monitor/<id>. The body
+must include a "mode" field ("grid" | "bsp" | "queue") plus whatever
+mode-specific fields that mode expects. No URL carryover, no shape
+inference — this is the unopinionated primitive.
+
+Input forms:
+  mux grid shape 3 '{"mode":"bsp","pages":["http://..."]}'
+  mux grid shape 3 @shape.json
+  cat shape.json | mux grid shape 3 -
+
+Typical grid → bsp pattern (URLs preserved by the caller, not by us):
+  curl -s $GRID/monitor/3 \
+    | jq '{mode:"bsp", pages: [.cells[] | if type=="string" then . else .url end]}' \
+    | mux grid shape 3 -
+
+Typical bsp → grid (you declare the target shape):
+  mux grid shape 3 '{
+    "mode":"grid",
+    "columns":{"A":["A1","A2"],"B":["B1"]},
+    "cells":{"A1":"url0","A2":"url1","B1":"url2"}
+  }'`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		monitor := args[0]
+		src := args[1]
+		var body []byte
+		var err error
+		switch {
+		case src == "-":
+			body, err = io.ReadAll(os.Stdin)
+		case strings.HasPrefix(src, "@"):
+			body, err = os.ReadFile(src[1:])
+		default:
+			body = []byte(src)
+		}
+		if err != nil {
+			return fmt.Errorf("reading shape: %w", err)
+		}
+		var probe map[string]json.RawMessage
+		if jerr := json.Unmarshal(body, &probe); jerr != nil {
+			return fmt.Errorf("invalid JSON: %w", jerr)
+		}
+		if _, ok := probe["mode"]; !ok {
+			return fmt.Errorf(`shape must include a "mode" field ("grid" | "bsp" | "queue")`)
+		}
+		c := grid.NewClient(gridURL)
+		if err := c.PutMonitor(monitor, body); err != nil {
+			return err
+		}
+		fmt.Printf("Reshaped monitor %s\n", monitor)
+		return nil
+	},
+}
+
 // --- Preset subcommands ---
 
 var gridPresetCmd = &cobra.Command{
@@ -381,6 +444,7 @@ func init() {
 	gridCmd.AddCommand(gridOpenCmd)
 	gridCmd.AddCommand(gridClearCmd)
 	gridCmd.AddCommand(gridBspCmd)
+	gridCmd.AddCommand(gridShapeCmd)
 	gridCmd.AddCommand(gridPresetCmd)
 	rootCmd.AddCommand(gridCmd)
 }

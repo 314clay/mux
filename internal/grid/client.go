@@ -334,6 +334,14 @@ func (c *Client) BSPReorder(monitorID string, urls []string) error {
 	return c.post(fmt.Sprintf("/monitor/%s/bsp/reorder", monitorID), map[string][]string{"pages": urls})
 }
 
+// PutMonitor replaces a monitor's full configuration with the provided
+// JSON body. The body must include a "mode" field; other fields
+// depend on the mode (grid/bsp/queue). Unopinionated — URLs and
+// geometry are whatever the caller supplies.
+func (c *Client) PutMonitor(monitorID string, body []byte) error {
+	return c.send("PUT", fmt.Sprintf("/monitor/%s", monitorID), json.RawMessage(body))
+}
+
 // --- Layout presets ---
 
 type PresetInfo struct {
